@@ -249,7 +249,7 @@ fun GalleryDetailContent(
     }
     fun onDownloadButtonClick() {
         galleryDetail ?: return
-        if (DownloadManager.getDownloadState(galleryDetail.gid) == DownloadInfo.STATE_INVALID) {
+        if (downloadState == DownloadInfo.STATE_INVALID) {
             launchUI { startDownload(false, galleryDetail.galleryInfo) }
         } else {
             launch { confirmRemoveDownload(galleryDetail) }

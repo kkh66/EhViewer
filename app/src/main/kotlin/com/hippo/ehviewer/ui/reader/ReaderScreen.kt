@@ -380,7 +380,7 @@ suspend inline fun <T> usePageLoader(args: ReaderScreenArgs, crossinline block: 
     is ReaderScreenArgs.Gallery -> {
         val info = args.info
         val page = args.page.takeUnless { it == -1 } ?: EhDB.getReadProgress(info.gid)
-        val archive = DownloadManager.getDownloadInfo(info.gid)?.archiveFile
+        val archive = DownloadManager.getDownloadInfoAsync(info.gid)?.archiveFile
         if (archive != null) {
             useArchivePageLoader(archive, info, page, info.hasAds, { error("Managed Archive have password???") }, block)
         } else {

@@ -12,6 +12,9 @@ interface DownloadLabelDao {
     @Query("SELECT * FROM DOWNLOAD_LABELS ORDER BY POSITION")
     suspend fun list(): List<DownloadLabel>
 
+    @Query("SELECT EXISTS(SELECT 1 FROM DOWNLOAD_LABELS LIMIT 1)")
+    suspend fun hasAny(): Boolean
+
     @Query("SELECT * FROM DOWNLOAD_LABELS ORDER BY POSITION LIMIT :limit OFFSET :offset")
     suspend fun list(offset: Int, limit: Int): List<DownloadLabel>
 

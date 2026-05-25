@@ -58,7 +58,6 @@ import com.hippo.ehviewer.coil.MapExtraInfoInterceptor
 import com.hippo.ehviewer.coil.MergeInterceptor
 import com.hippo.ehviewer.coil.QrCodeInterceptor
 import com.hippo.ehviewer.dailycheck.checkDawn
-import com.hippo.ehviewer.download.DownloadManager
 import com.hippo.ehviewer.download.DownloadsFilterMode
 import com.hippo.ehviewer.ktbuilder.diskCache
 import com.hippo.ehviewer.ktbuilder.imageLoader
@@ -126,11 +125,11 @@ class EhApplication : Application(), SingletonImageLoader.Factory {
             launch { dataStateFlow.value }
             launch { OSUtils.totalMemory }
             launch {
-                if (DownloadManager.labelList.isNotEmpty() && Settings.downloadFilterMode !in Settings.snapshot()) {
+                EhDB.resetRunningDownloadInfo()
+                if (EhDB.hasDownloadLabels() && Settings.downloadFilterMode !in Settings.snapshot()) {
                     Settings.downloadFilterMode.value = DownloadsFilterMode.CUSTOM.flag
                 }
                 initialized = true
-                DownloadManager.readMetadataFromLocal()
             }
             launch {
                 FileUtils.cleanupDirectory(AppConfig.externalCrashDir)

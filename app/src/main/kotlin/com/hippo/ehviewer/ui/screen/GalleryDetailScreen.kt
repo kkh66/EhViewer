@@ -270,7 +270,7 @@ fun AnimatedVisibilityScope.GalleryDetailScreen(args: GalleryDetailScreenArgs, n
                         clickableItem(
                             onClick = {
                                 launchIO {
-                                    val downloadInfo = DownloadManager.getDownloadInfo(gid)
+                                    val downloadInfo = DownloadManager.getDownloadInfoAsync(gid)
                                     val canExport = downloadInfo?.state == DownloadInfo.STATE_FINISH
                                     if (!canExport) {
                                         awaitConfirmationOrCancel(

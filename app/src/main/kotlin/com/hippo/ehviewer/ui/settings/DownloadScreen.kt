@@ -233,6 +233,7 @@ fun AnimatedVisibilityScope.DownloadScreen(navigator: DestinationsNavigator) = S
                 }
 
                 runSuspendCatching {
+                    DownloadManager.ensureInitialized()
                     DownloadManager.downloadInfoList.parMapNotNull {
                         if (it.state == DownloadInfo.STATE_FINISH && !it.isStable()) it else null
                     }.apply {
@@ -266,7 +267,7 @@ fun AnimatedVisibilityScope.DownloadScreen(navigator: DestinationsNavigator) = S
                             }
                         } ?: return null
                         val dirname = file.name
-                        if (DownloadManager.containDownloadInfo(gid)) {
+                        if (DownloadManager.containDownloadInfoAsync(gid)) {
                             // Restore download dir to avoid redownload
                             val dbdirname = EhDB.getDownloadDirname(gid)
                             if (null == dbdirname || dirname != dbdirname) {
@@ -305,13 +306,13 @@ fun AnimatedVisibilityScope.DownloadScreen(navigator: DestinationsNavigator) = S
                 title = stringResource(id = R.string.settings_download_clean_redundancy),
                 summary = stringResource(id = R.string.settings_download_clean_redundancy_summary),
             ) {
-                fun isRedundant(file: Path): Boolean {
+                suspend fun isRedundant(file: Path): Boolean {
                     if (!file.isDirectory) return false
                     val name = file.name
                     val gid = name.substringBefore('-').toLongOrNull() ?: return false
-                    return name != DownloadManager.getDownloadInfo(gid)?.dirname
+                    return name != DownloadManager.getDownloadInfoAsync(gid)?.dirname
                 }
-                val list = downloadLocation.list().filter(::isRedundant)
+                val list = downloadLocation.list().parMapNotNull { if (isRedundant(it)) it else null }
                 if (list.isNotEmpty()) {
                     awaitConfirmationOrCancel(
                         confirmText = R.string.delete,

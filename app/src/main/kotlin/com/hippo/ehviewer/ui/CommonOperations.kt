@@ -119,7 +119,16 @@ suspend fun startDownload(forceDefault: Boolean, vararg galleryInfos: BaseGaller
     if (isAtLeastT) {
         requestPermission(Manifest.permission.POST_NOTIFICATIONS)
     }
-    val (toStart, toAdd) = galleryInfos.partition { DownloadManager.containDownloadInfo(it.gid) }
+    DownloadManager.ensureLabelsInitialized()
+    val toStart = mutableListOf<BaseGalleryInfo>()
+    val toAdd = mutableListOf<BaseGalleryInfo>()
+    galleryInfos.forEach {
+        if (DownloadManager.containDownloadInfoAsync(it.gid)) {
+            toStart.add(it)
+        } else {
+            toAdd.add(it)
+        }
+    }
     if (toStart.isNotEmpty()) {
         val list = toStart.mapToLongArray(GalleryInfo::gid)
         DownloadService.startRangeDownload(list)
@@ -276,7 +285,7 @@ private fun navToReader(args: ReaderScreenArgs) = nav.navigate(ReaderScreenDesti
 
 context(_: DialogState, _: MainActivity, _: DestinationsNavigator)
 suspend fun doGalleryInfoAction(info: BaseGalleryInfo) {
-    val downloaded = DownloadManager.getDownloadState(info.gid) != DownloadInfo.STATE_INVALID
+    val downloaded = DownloadManager.getDownloadStateAsync(info.gid) != DownloadInfo.STATE_INVALID
     val favorited = info.favoriteSlot != NOT_FAVORITED
     val items = buildList {
         add(Icons.AutoMirrored.Default.MenuBook to R.string.read)
@@ -384,6 +393,7 @@ suspend fun confirmRemoveDownloadRange(list: Collection<DownloadInfo>) {
 
 context(_: DialogState)
 suspend fun showMoveDownloadLabel(info: GalleryInfo) {
+    DownloadManager.ensureLabelsInitialized()
     val defaultLabel = appCtx.getString(R.string.default_download_label_name)
     val labels = buildList {
         add(defaultLabel)
@@ -392,13 +402,14 @@ suspend fun showMoveDownloadLabel(info: GalleryInfo) {
         }
     }
     val selected = awaitSelectItem(labels, R.string.download_move_dialog_title)
-    val downloadInfo = DownloadManager.getDownloadInfo(info.gid) ?: return
+    val downloadInfo = DownloadManager.getDownloadInfoAsync(info.gid) ?: return
     val label = if (selected == 0) null else labels[selected]
     DownloadManager.changeLabel(listOf(downloadInfo), label)
 }
 
 context(_: DialogState)
 suspend fun showMoveDownloadLabelList(list: Collection<DownloadInfo>): String? {
+    DownloadManager.ensureLabelsInitialized()
     val defaultLabel = appCtx.getString(R.string.default_download_label_name)
     val labels = buildList {
         add(defaultLabel)

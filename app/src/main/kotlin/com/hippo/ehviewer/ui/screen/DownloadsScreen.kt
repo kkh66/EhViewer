@@ -66,7 +66,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -85,6 +84,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewModelScope
+import androidx.paging.LoadState
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.cachedIn
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemContentType
+import androidx.paging.compose.itemKey
 import arrow.core.partially1
 import com.ehviewer.core.database.model.DownloadInfo
 import com.ehviewer.core.i18n.R
@@ -149,8 +156,6 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
     val filterMode by Settings.downloadFilterMode.collectAsState { DownloadsFilterMode.from(it) }
     val showProgress by Settings.showReadingProgress.collectAsState()
     var filterState by rememberSerializable { mutableStateOf(DownloadsFilterState(filterMode, Settings.recentDownloadLabel.value)) }
-    var invalidateKey by rememberSaveable { mutableStateOf(false) }
-    var isLoading by rememberSaveable { mutableStateOf(true) }
     var searchBarExpanded by rememberSaveable { mutableStateOf(false) }
     var searchBarOffsetY by remember { mutableIntStateOf(0) }
     val animateItems by Settings.animateItems.collectAsState()
@@ -160,6 +165,9 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
     val checkedInfoMap = remember { mutableStateMapOf<Long, DownloadInfo>() }
     val selectMode by rememberUpdatedState(checkedInfoMap.isNotEmpty())
     DrawerHandle(!selectMode && !searchBarExpanded)
+    LaunchedEffect(Unit) {
+        DownloadManager.ensureLabelsInitialized()
+    }
 
     val density = LocalDensity.current
     val canTranslate = Settings.showTagTranslations.value && EhTagDatabase.translatable && EhTagDatabase.initialized
@@ -186,20 +194,13 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
         },
     )
     val hint = stringResource(R.string.search_bar_hint, title)
-    val list = if (DownloadManager.isInitialized) {
-        remember(filterState, invalidateKey) {
-            DownloadManager.downloadInfoList.filterTo(mutableStateListOf()) { info ->
-                filterState.take(info)
-            }.also {
-                launch {
-                    delay(200)
-                    isLoading = false
-                }
-            }
-        }
-    } else {
-        remember { mutableStateListOf() }
-    }
+    val listKey = Triple(filterState, sortMode, Settings.showJpnTitle.value)
+    val data = rememberInVM(listKey) {
+        Pager(config = PagingConfig(pageSize = 50, jumpThreshold = 100)) {
+            EhDB.downloadsLazyList(filterState, SortMode.from(sortMode), Settings.showJpnTitle.value)
+        }.flow.cachedIn(viewModelScope)
+    }.collectAsLazyPagingItems()
+    val loadedList = data.itemSnapshotList.items
 
     val newLabel = stringResource(R.string.new_label_title)
     val renameLabel = stringResource(R.string.rename_label_title)
@@ -385,7 +386,7 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
                                 DownloadManager.deleteLabel(item)
                                 when (filterState.label) {
                                     item -> switchLabel("")
-                                    null -> invalidateKey = !invalidateKey
+                                    null -> data.refresh()
                                 }
                             }.onFailure {
                                 dismissState.reset()
@@ -548,7 +549,7 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
                     text = { Text(text = stringResource(id = R.string.download_start_all_reversed)) },
                     onClick = {
                         expanded = false
-                        val gidList = list.filter { it.state != DownloadInfo.STATE_FINISH }.asReversed().mapToLongArray(DownloadInfo::gid)
+                        val gidList = loadedList.filter { it.state != DownloadInfo.STATE_FINISH }.asReversed().mapToLongArray(DownloadInfo::gid)
                         DownloadService.startRangeDownload(gidList)
                     },
                 )
@@ -590,15 +591,22 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
                     verticalItemSpacing = gridInterval,
                     horizontalArrangement = Arrangement.spacedBy(gridInterval),
                 ) {
-                    items(list, key = { it.gid }) { info ->
-                        GalleryInfoGridItem(
-                            onClick = ::onItemClick.partially1(info),
-                            onLongClick = { navigate(info.galleryInfo.asDst()) },
-                            info = info,
-                            modifier = Modifier.thenIf(animateItems) { animateItem() },
-                            showLanguage = false,
-                            showProgress = showProgress,
-                        )
+                    items(
+                        count = data.itemCount,
+                        key = data.itemKey(key = { it.gid }),
+                        contentType = data.itemContentType(),
+                    ) { index ->
+                        val info = data[index]
+                        if (info != null) {
+                            GalleryInfoGridItem(
+                                onClick = ::onItemClick.partially1(info),
+                                onLongClick = { navigate(info.galleryInfo.asDst()) },
+                                info = info,
+                                modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                showLanguage = false,
+                                showProgress = showProgress,
+                            )
+                        }
                     }
                 }
             } else {
@@ -607,51 +615,58 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
                     contentPadding = realPadding,
                     verticalArrangement = Arrangement.spacedBy(dimensionResource(com.hippo.ehviewer.R.dimen.gallery_list_interval)),
                 ) {
-                    items(list, key = { it.gid }) { info ->
-                        val checked = info.gid in checkedInfoMap
-                        CheckableItem(
-                            checked = checked,
-                            modifier = Modifier.thenIf(animateItems) { animateItem() },
-                        ) { interactionSource ->
-                            DownloadCard(
-                                onClick = {
-                                    if (selectMode) {
-                                        if (checked) {
-                                            checkedInfoMap.remove(info.gid)
+                    items(
+                        count = data.itemCount,
+                        key = data.itemKey(key = { it.gid }),
+                        contentType = data.itemContentType(),
+                    ) { index ->
+                        val info = data[index]
+                        if (info != null) {
+                            val checked = info.gid in checkedInfoMap
+                            CheckableItem(
+                                checked = checked,
+                                modifier = Modifier.thenIf(animateItems) { animateItem() },
+                            ) { interactionSource ->
+                                DownloadCard(
+                                    onClick = {
+                                        if (selectMode) {
+                                            if (checked) {
+                                                checkedInfoMap.remove(info.gid)
+                                            } else {
+                                                checkedInfoMap[info.gid] = info
+                                            }
                                         } else {
-                                            checkedInfoMap[info.gid] = info
+                                            onItemClick(info)
                                         }
-                                    } else {
-                                        onItemClick(info)
-                                    }
-                                },
-                                onThumbClick = {
-                                    navigate(info.galleryInfo.asDst())
-                                },
-                                onLongClick = {
-                                    checkedInfoMap[info.gid] = info
-                                },
-                                onStart = {
-                                    DownloadService.startDownload(info.galleryInfo)
-                                },
-                                onStop = { launchIO { DownloadManager.stopDownload(info.gid) } },
-                                info = info,
-                                selectMode = selectMode,
-                                showProgress = showProgress,
-                                modifier = Modifier.height(height),
-                                interactionSource = interactionSource,
-                            )
+                                    },
+                                    onThumbClick = {
+                                        navigate(info.galleryInfo.asDst())
+                                    },
+                                    onLongClick = {
+                                        checkedInfoMap[info.gid] = info
+                                    },
+                                    onStart = {
+                                        DownloadService.startDownload(info.galleryInfo)
+                                    },
+                                    onStop = { launchIO { DownloadManager.stopDownload(info.gid) } },
+                                    info = info,
+                                    selectMode = selectMode,
+                                    showProgress = showProgress,
+                                    modifier = Modifier.height(height),
+                                    interactionSource = interactionSource,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        if (isLoading) {
+        if (data.loadState.refresh is LoadState.Loading) {
             Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface), contentAlignment = Alignment.Center) {
                 CircularWavyProgressIndicator()
             }
-        } else if (list.isEmpty()) {
+        } else if (data.loadState.refresh is LoadState.NotLoading && data.itemCount == 0) {
             Column(
                 modifier = Modifier.padding(realPadding).fillMaxSize(),
                 verticalArrangement = Arrangement.Center,
@@ -691,8 +706,8 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
     ) {
         if (!selectMode) {
             onClick(Icons.Default.Shuffle) {
-                if (list.isNotEmpty()) {
-                    withUIContext { navToReader(list.random().galleryInfo) }
+                if (loadedList.isNotEmpty()) {
+                    withUIContext { navToReader(loadedList.random().galleryInfo) }
                 }
             }
             onClick(Icons.AutoMirrored.Default.Sort) {
@@ -708,9 +723,7 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
                 val mode = SortMode.All[selected].copy(groupByDownloadLabel = checked)
                 if (mode != oldMode) {
                     sortMode = mode.flag
-                    isLoading = true
-                    DownloadManager.sortDownloads(mode)
-                    invalidateKey = !invalidateKey
+                    data.refresh()
                 }
             }
             onClick(Icons.Default.FilterList) {
@@ -724,7 +737,7 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
             }
         } else {
             onClick(Icons.Default.DoneAll, autoClose = false) {
-                val info = list.associateBy { it.gid }
+                val info = loadedList.associateBy { it.gid }
                 checkedInfoMap.putAll(info)
             }
             onClick(Icons.Default.PlayArrow) {
@@ -738,14 +751,14 @@ fun AnimatedVisibilityScope.DownloadsScreen(navigator: DestinationsNavigator) = 
             onClick(Icons.Default.Delete) {
                 val infoList = checkedInfoMap.takeAndClear()
                 confirmRemoveDownloadRange(infoList)
-                list.removeAll(infoList)
+                data.refresh()
             }
             onClick(Icons.AutoMirrored.Default.DriveFileMove) {
                 val infoList = checkedInfoMap.takeAndClear()
                 val toLabel = showMoveDownloadLabelList(infoList)
                 with(filterState) {
                     if (label != "" && label != toLabel) {
-                        list.removeAll(infoList)
+                        data.refresh()
                     }
                 }
             }

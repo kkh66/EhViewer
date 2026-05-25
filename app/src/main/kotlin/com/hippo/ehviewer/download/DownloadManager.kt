@@ -25,6 +25,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.util.size
@@ -56,12 +57,12 @@ import com.hippo.ehviewer.spider.readCompatFromPath
 import com.hippo.ehviewer.spider.toSimpleTags
 import com.hippo.ehviewer.util.AppConfig
 import com.hippo.ehviewer.util.insertWith
-import com.hippo.ehviewer.util.runAssertingNotMainThread
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -75,18 +76,17 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     override val coroutineContext = Dispatchers.IO + Job()
 
     // All download info list
-    private val allInfoList = runAssertingNotMainThread { EhDB.getAllDownloadInfo() as MutableList }
+    private val allInfoList = mutableListOf<DownloadInfo>()
 
     val downloadInfoList: List<DownloadInfo>
         get() = allInfoList
 
     // All download info map
-    private val mAllInfoMap = allInfoList.associateBy { it.gid } as MutableMap<Long, DownloadInfo>
+    private val mAllInfoMap = mutableMapOf<Long, DownloadInfo>()
 
     // All labels without default label
     // Create the SnapshotStateList first in case the database query is time-consuming
     val labelList = mutableStateListOf<DownloadLabel>().apply {
-        addAll(runAssertingNotMainThread { EhDB.getAllDownloadLabelList() })
     }
 
     // Store download info wait to start
@@ -98,6 +98,9 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     private val mutableNotifyFlow = MutableSharedFlow<DownloadInfo>(extraBufferCapacity = 1)
     val notifyFlow = mutableNotifyFlow.asSharedFlow()
 
+    private val initMutex = Mutex()
+    private val labelMutex = Mutex()
+    private var labelsInitialized = false
     private val mutex = Mutex()
 
     private val sortMutex = Mutex()
@@ -109,9 +112,44 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
 
     init {
         launch {
-            val mode = sortMode
-            if (mode != SortMode.Default) sortDownloads(mode)
+            ensureLabelsInitialized()
+        }
+    }
+
+    suspend fun ensureInitialized() {
+        if (isInitialized) {
+            return
+        }
+        initMutex.withLock {
+            if (isInitialized) {
+                return
+            }
+            val list = EhDB.getAllDownloadInfo()
+            sortMutex.withLock {
+                allInfoList.clear()
+                allInfoList.addAll(list)
+                val mode = sortMode
+                if (mode != SortMode.Default) {
+                    allInfoList.sortWith(mode.comparator())
+                }
+                mAllInfoMap.clear()
+                mAllInfoMap.putAll(list.associateBy { it.gid })
+            }
             isInitialized = true
+        }
+    }
+
+    suspend fun ensureLabelsInitialized() {
+        if (labelsInitialized) {
+            return
+        }
+        labelMutex.withLock {
+            if (labelsInitialized) {
+                return
+            }
+            labelList.clear()
+            labelList.addAll(EhDB.getAllDownloadLabelList())
+            labelsInitialized = true
         }
     }
 
@@ -124,12 +162,24 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
 
     fun containDownloadInfo(gid: Long) = mAllInfoMap.containsKey(gid)
 
+    suspend fun containDownloadInfoAsync(gid: Long) = getDownloadInfoAsync(gid) != null
+
     fun getDownloadInfo(gid: Long) = mAllInfoMap[gid]
+
+    suspend fun getDownloadInfoAsync(gid: Long) = mAllInfoMap[gid] ?: EhDB.getDownloadInfo(gid)?.also {
+        sortMutex.withLock {
+            if (mAllInfoMap.putIfAbsent(it.gid, it) == null && isInitialized) {
+                allInfoList.insertWith(it, sortMode.comparator())
+            }
+        }
+    }
 
     fun getDownloadState(gid: Long): Int {
         val info = mAllInfoMap[gid]
         return info?.state ?: DownloadInfo.STATE_INVALID
     }
+
+    suspend fun getDownloadStateAsync(gid: Long) = getDownloadInfoAsync(gid)?.state ?: DownloadInfo.STATE_INVALID
 
     fun setDownloadListener(listener: DownloadListener?) {
         mDownloadListener = listener
@@ -180,7 +230,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
         }
 
         // Check in download list
-        var info = mAllInfoMap[galleryInfo.gid]
+        var info = getDownloadInfoAsync(galleryInfo.gid)
         if (info != null) { // Get it in download list
             if (info.state != DownloadInfo.STATE_WAIT) {
                 // Set state DownloadInfo.STATE_WAIT
@@ -201,7 +251,9 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
             info.state = DownloadInfo.STATE_WAIT
             // Add to all download list and map
             sortMutex.withLock {
-                allInfoList.insertWith(info, sortMode.comparator())
+                if (isInitialized) {
+                    allInfoList.insertWith(info, sortMode.comparator())
+                }
             }
             mAllInfoMap[galleryInfo.gid] = info
 
@@ -222,7 +274,9 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun startRangeDownload(gidList: LongArray) {
-        val updateList = gidList.mapNotNull { mAllInfoMap[it] }
+        val updateList = EhDB.getDownloadInfo(gidList).onEach {
+            mAllInfoMap[it.gid] = it
+        }
             .filter {
                 when (it.state) {
                     DownloadInfo.STATE_NONE, DownloadInfo.STATE_FAILED, DownloadInfo.STATE_FINISH -> true
@@ -242,15 +296,17 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
 
     @Stable
     @Composable
-    fun collectDownloadState(gid: Long): State<Int> = remember {
-        notifyFlow.transform { if (it.gid == gid) emit(getDownloadState(gid)) }
-    }.collectAsState(getDownloadState(gid))
+    fun collectDownloadState(gid: Long): State<Int> = produceState(getDownloadState(gid), gid) {
+        value = getDownloadStateAsync(gid)
+        notifyFlow.collect { if (it.gid == gid) value = it.state }
+    }
 
     @Stable
     @Composable
-    fun collectContainDownloadInfo(gid: Long): State<Boolean> = remember {
-        notifyFlow.transform { if (it.gid == gid) emit(containDownloadInfo(gid)) }
-    }.collectAsState(containDownloadInfo(gid))
+    fun collectContainDownloadInfo(gid: Long): State<Boolean> = produceState(containDownloadInfo(gid), gid) {
+        value = containDownloadInfoAsync(gid)
+        notifyFlow.collect { if (it.gid == gid) value = containDownloadInfo(gid) }
+    }
 
     @Stable
     @Composable
@@ -259,13 +315,8 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }.collectAsState(transform(info)).value
 
     suspend fun startAllDownload() {
-        val updateList = sortMutex.withLock {
-            allInfoList.filter {
-                when (it.state) {
-                    DownloadInfo.STATE_NONE, DownloadInfo.STATE_FAILED -> true
-                    else -> false
-                }
-            }
+        val updateList = EhDB.getStartableDownloadInfo().onEach {
+            mAllInfoMap[it.gid] = it
         }
         if (updateList.isNotEmpty()) {
             updateList.onEach {
@@ -281,7 +332,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     suspend fun addDownload(downloadInfoList: List<DownloadInfo>) = sortMutex.withLock {
         val comparator = sortMode.comparator()
         downloadInfoList.forEach { info ->
-            if (containDownloadInfo(info.gid)) return@forEach
+            if (mAllInfoMap.containsKey(info.gid) || EhDB.getDownloadInfo(info.gid) != null) return@forEach
 
             // Ensure download state
             if (DownloadInfo.STATE_WAIT == info.state || DownloadInfo.STATE_DOWNLOAD == info.state) {
@@ -289,7 +340,9 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
             }
 
             // Add to all download list and map
-            allInfoList.insertWith(info, comparator)
+            if (isInitialized) {
+                allInfoList.insertWith(info, comparator)
+            }
             mAllInfoMap[info.gid] = info
 
             // Save to
@@ -299,6 +352,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun addDownloadLabel(downloadLabelList: List<DownloadLabel>) {
+        ensureLabelsInitialized()
         val offset = downloadLabelList.size
         downloadLabelList.forEachIndexed { index, label ->
             if (!containLabel(label.label)) {
@@ -314,7 +368,9 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
 
         // Add to all download list and map
         sortMutex.withLock {
-            allInfoList.insertWith(info, sortMode.comparator())
+            if (isInitialized) {
+                allInfoList.insertWith(info, sortMode.comparator())
+            }
         }
         mAllInfoMap[galleryInfo.gid] = info
 
@@ -368,14 +424,16 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
 
     suspend fun deleteDownload(gid: Long, deleteFiles: Boolean = false) {
         stopDownloadInternal(gid)
-        val info = mAllInfoMap[gid]
+        val info = getDownloadInfoAsync(gid)
         if (info != null) {
             // Remove from DB
             EhDB.removeDownloadInfo(info)
 
             // Remove all list and map
             sortMutex.withLock {
-                allInfoList.remove(info)
+                if (isInitialized) {
+                    allInfoList.remove(info)
+                }
             }
             mAllInfoMap.remove(info.gid)
 
@@ -395,13 +453,14 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
 
     suspend fun deleteRangeDownload(gidList: LongArray) {
         stopRangeDownloadInternal(gidList)
-        val list = gidList.mapNotNull { gid ->
-            mAllInfoMap.remove(gid)
-        }
+        val list = EhDB.getDownloadInfo(gidList)
         EhDB.removeDownloadInfo(list)
         sortMutex.withLock {
-            allInfoList.removeAll(list.toSet())
+            if (isInitialized) {
+                allInfoList.removeAll(list.toSet())
+            }
         }
+        gidList.forEach(mAllInfoMap::remove)
 
         // Update listener
         list.forEach { mutableNotifyFlow.emit(it) }
@@ -411,7 +470,9 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun sortDownloads(mode: SortMode) = sortMutex.withLock {
-        allInfoList.sortWith(mode.comparator())
+        if (isInitialized) {
+            allInfoList.sortWith(mode.comparator())
+        }
     }
 
     suspend fun resetAllReadingProgress() = runCatching {
@@ -516,6 +577,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun addLabel(label: String?) {
+        ensureLabelsInitialized()
         if (label == null || containLabel(label)) {
             return
         }
@@ -523,6 +585,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun renameLabel(from: String, to: String) {
+        ensureLabelsInitialized()
         val index = labelList.indexOfFirst { it.label == from }
         if (index != -1) {
             val exist = labelList.removeAt(index)
@@ -540,6 +603,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun deleteLabel(label: String) {
+        ensureLabelsInitialized()
         with(labelList) {
             val index = indexOfFirst { it.label == label }
             val item = get(index)
@@ -559,6 +623,7 @@ object DownloadManager : OnSpiderListener, CoroutineScope {
     }
 
     suspend fun readMetadataFromLocal() {
+        ensureInitialized()
         val list = sortMutex.withLock {
             allInfoList.mapNotNull {
                 val updateGallery = it.pages == 0 || it.simpleTags == null

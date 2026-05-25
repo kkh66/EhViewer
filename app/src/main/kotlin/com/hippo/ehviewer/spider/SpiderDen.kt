@@ -332,7 +332,7 @@ class SpiderDen(val info: GalleryInfo) {
                 }
                 info.getComicInfo().apply {
                     writeComicInfo(this, it)
-                    DownloadManager.getDownloadInfo(gid)?.let { downloadInfo ->
+                    DownloadManager.getDownloadInfoAsync(gid)?.let { downloadInfo ->
                         downloadInfo.artistInfoList = DownloadArtist.from(gid, penciller.orEmpty())
                         EhDB.putDownloadArtist(gid, downloadInfo.artistInfoList)
                     }

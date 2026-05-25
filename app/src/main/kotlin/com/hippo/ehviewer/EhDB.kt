@@ -38,6 +38,9 @@ import com.ehviewer.core.files.delete
 import com.ehviewer.core.files.sendTo
 import com.ehviewer.core.model.GalleryInfo
 import com.hippo.ehviewer.download.DownloadManager
+import com.hippo.ehviewer.download.DownloadsFilterMode
+import com.hippo.ehviewer.download.SortMode
+import com.hippo.ehviewer.ui.screen.DownloadsFilterState
 import kotlinx.coroutines.flow.Flow
 import okio.Path
 
@@ -68,6 +71,56 @@ object EhDB {
         if (it.state == DownloadInfo.STATE_WAIT || it.state == DownloadInfo.STATE_DOWNLOAD) {
             it.state = DownloadInfo.STATE_NONE
         }
+    }
+
+    suspend fun getDownloadInfo(gid: Long) = db.downloadsDao().joinOne(gid)
+
+    suspend fun getDownloadInfo(gidList: LongArray) = db.downloadsDao().joinList(gidList).onEach {
+        if (it.state == DownloadInfo.STATE_WAIT || it.state == DownloadInfo.STATE_DOWNLOAD) {
+            it.state = DownloadInfo.STATE_NONE
+        }
+    }
+
+    suspend fun getStartableDownloadInfo() = db.downloadsDao().joinListByState(
+        intArrayOf(DownloadInfo.STATE_NONE, DownloadInfo.STATE_FAILED),
+    )
+
+    fun downloadsLazyList(filter: DownloadsFilterState, sort: SortMode, showJpnTitle: Boolean) = with(filter) {
+        val labelAll = label == ""
+        val labelValue = label.takeUnless { labelAll }
+        val modeValue = when (mode) {
+            DownloadsFilterMode.CUSTOM -> 0
+            DownloadsFilterMode.ARTIST -> 1
+        }
+        val keywordValue = keyword.trim().takeIf { it.isNotEmpty() }?.let { "*$it*" }
+        if (keywordValue == null) {
+            db.downloadsDao().joinListLazy(
+                modeValue,
+                labelValue,
+                labelAll,
+                state,
+                sort.field.value,
+                sort.order.value,
+                sort.groupByDownloadLabel,
+                showJpnTitle,
+            )
+        } else {
+            db.downloadsDao().searchListLazy(
+                keywordValue,
+                modeValue,
+                labelValue,
+                labelAll,
+                state,
+                sort.field.value,
+                sort.order.value,
+                sort.groupByDownloadLabel,
+                showJpnTitle,
+            )
+        }
+    }
+
+    suspend fun resetRunningDownloadInfo() {
+        db.downloadsDao().resetRunningState()
     }
 
     suspend fun updateDownloadInfo(downloadInfo: Collection<DownloadInfo>) {
@@ -124,6 +177,8 @@ object EhDB {
         get() = db.downloadsDao().countByArtist()
 
     suspend fun getAllDownloadLabelList() = db.downloadLabelDao().list()
+
+    suspend fun hasDownloadLabels() = db.downloadLabelDao().hasAny()
 
     suspend fun addDownloadLabel(raw: DownloadLabel): DownloadLabel {
         // Reset id
