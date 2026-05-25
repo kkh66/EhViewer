@@ -81,7 +81,7 @@ android {
         create("default") {
             minSdk = 26
         }
-        create("testing") {
+        create("qa") {
             applicationId = "com.test.ehviewer"
             minSdk = 26
             versionNameSuffix = "-TEST"
