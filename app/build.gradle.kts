@@ -81,11 +81,6 @@ android {
         create("default") {
             minSdk = 26
         }
-        create("qa") {
-            applicationId = "com.test.ehviewer"
-            minSdk = 26
-            versionNameSuffix = "-TEST"
-        }
         create("marshmallow") {
             applicationIdSuffix = ".m"
             versionNameSuffix = "-M"

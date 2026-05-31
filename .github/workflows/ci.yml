@@ -123,65 +123,6 @@ jobs:
           name: default-native-debug-symbols-${{ github.sha }}
           path: app/build/outputs/native-debug-symbols/defaultRelease/native-debug-symbols.zip
 
-  testing:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Install Rust Toolchain
-        run: rustup target add thumbv7neon-linux-androideabi
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "./app/src/main/rust"
-          shared-key: ${{ runner.os }}
-          save-if: "false"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          cache-encryption-key: ${{ secrets.GradleEncryptionKey }}
-
-      - name: CMake Cache
-        uses: actions/cache@v5
-        with:
-          path: app/.cxx
-          key: cmake-qa-${{ hashFiles('rust-toolchain.toml', 'settings.gradle.kts', 'app/src/main/cpp/CMakeLists.txt', 'app/src/main/rust/Cargo.lock') }}
-          restore-keys: cmake-qa-
-
-      # https://github.com/mikepenz/AboutLibraries/issues/1225
-      - name: Generate aboutlibraries.json
-        run: ./gradlew :app:prepareLibraryDefinitionsQaRelease --rerun
-
-      - name: Build
-        run: ./gradlew assembleQaRelease
-
-      - name: Upload ARM64
-        uses: actions/upload-artifact@v7
-        with:
-          name: testing-arm64-v8a-${{ github.sha }}
-          path: app/build/outputs/apk/qa/release/app-qa-arm64-v8a-release.apk
-
-      - name: Upload x86_64
-        uses: actions/upload-artifact@v7
-        with:
-          name: testing-x86_64-${{ github.sha }}
-          path: app/build/outputs/apk/qa/release/app-qa-x86_64-release.apk
-
-      - name: Upload ARM32
-        uses: actions/upload-artifact@v7
-        with:
-          name: testing-armeabi-v7a-${{ github.sha }}
-          path: app/build/outputs/apk/qa/release/app-qa-armeabi-v7a-release.apk
-
   marshmallow:
     runs-on: ubuntu-latest
     steps:
